@@ -1,5 +1,8 @@
-use std::{fs, ops::Add, path::PathBuf, process::Command, str::FromStr};
+mod at;
 
+use std::{fs, path::PathBuf};
+
+use at::{remove_job, schedule_jobs_from_file};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, Timelike};
 use home::home_dir;
 // ANSI escape codes for colors
@@ -167,6 +170,7 @@ rm mycron"#;
         // start a timer
         // start the cronjob which will execute after specified time
         // after endtime execute self.end_timer
+
         let now = Local::now();
         let naive_time =
             NaiveTime::parse_from_str(time, "%H:%M:%S").expect("Failed to parse duration");
@@ -176,27 +180,35 @@ rm mycron"#;
             + Duration::minutes(naive_time.minute() as i64)
             + Duration::seconds(naive_time.second() as i64);
         let future = now + duration;
-        println!(
-            "{} {}",
-            future.format("%H:%M").to_string(),
-            home_dir().unwrap().join(exe_path).to_str().unwrap()
-        );
-
-        Command::new("sh")
-            .arg(self.workdir.join("cron.sh"))
-            .arg(home_dir().unwrap().join(exe_path).to_str().unwrap())
-            .arg(future.format("%H:%M").to_string())
-            .output()
-            .expect("Failed to execute shell script");
+        println!("{} {}", future.format("%H:%M").to_string(), exe_path);
+        match schedule_jobs_from_file(future.format("%H:%M").to_string().as_str(), exe_path) {
+            Ok(jid) => {
+                self.save_job_id(&jid).expect("Failed to save job id");
+                println!("JOBID: {}", jid);
+            }
+            Err(e) => eprintln!("{}", e),
+        };
     }
 
-    fn end_timer(&self) {
+    fn end_timer(&self, job_id: &str) {
         // end a timer
         // specified time has elapsed, removed the cron job
-        Command::new("atrm")
-            .arg("-")
-            .output()
-            .expect("Failed to execute shell script");
+        match remove_job(job_id) {
+            Ok(_) => println!("Removed job"),
+            Err(e) => eprintln!("Can not remove job: {}", e),
+        };
+    }
+
+    fn save_job_id(&self, id: &str) -> Result<(), std::io::Error> {
+        fs::write(self.workdir.join("job.txt"), id)?;
+        Ok(())
+    }
+
+    fn get_job_id(&self) -> Option<String> {
+        match fs::read_to_string(self.workdir.join("job.txt")) {
+            Ok(con) => Some(con),
+            Err(_) => None,
+        }
     }
 }
 
@@ -205,14 +217,18 @@ fn main() {
     timer.display_calendar();
 
     let args: Vec<String> = std::env::args().collect();
-    let this_exe_path = args.first().unwrap();
     for (i, arg) in args.iter().enumerate() {
         match arg.as_str() {
             "st" => timer.set_timer(
-                &(this_exe_path.to_owned() + " ed"),
+                timer.workdir.join("tasks.txt").to_str().unwrap(),
                 args.get(i + 1).unwrap(),
             ),
-            "ed" => timer.end_timer(),
+            "ed" => {
+                let jid = timer.get_job_id();
+                if let Some(j) = jid {
+                    timer.end_timer(&j);
+                }
+            }
             _ => (),
         }
     }
