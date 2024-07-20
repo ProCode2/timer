@@ -1,13 +1,18 @@
-mod at;
+use std::{
+    fs,
+    io::Write,
+    path::PathBuf,
+    thread::{self, JoinHandle},
+};
 
-use std::{fs, path::PathBuf};
-
-use at::{remove_job, schedule_jobs_from_file};
-use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, Timelike};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveTime, TimeDelta, Timelike};
 use home::home_dir;
+use rodio::source::SineWave;
+use rodio::{OutputStream, Sink, Source};
 // ANSI escape codes for colors
 const RESET: &str = "\x1b[0m";
 const BLACK_ON_WHITE: &str = "\x1b[30;47m";
+const CLEAR_LINE: &str = "\x1B[2K\x1B[0G";
 
 struct Timer<'a> {
     weekdays: [&'a str; 7],
@@ -35,39 +40,31 @@ impl<'a> Timer<'a> {
             }
         }
 
-        // write the cron shell script to a file in workdir
-        let sh_content = r#"
-#!/bin/bash
-
-exe_path=$1
-start_time=$2
-
-# Calculate the cron time format (e.g., 10 seconds from now)
-cron_time=$(date -d @$(( $(date +%s) + $start_time )) "+%M %H %d %m *")
-
-# Write out current crontab
-crontab -l > mycron
-
-# Echo new cron into cron file
-echo "$cron_time $exe_path" >> mycron
-
-# Install new cron file
-crontab mycron
-rm mycron"#;
-        let cron_file = workdir.join("cron.sh");
-
-        if !cron_file.exists() {
-            match fs::write(workdir.join("cron.sh"), sh_content) {
-                Ok(_) => println!("Added timer functionality"),
-                Err(e) => eprintln!("Can not add timer functionality at the moment. {}", e),
-            }
-        }
-
         Self {
             current_datetime,
             weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Sat", "Sun"],
             workdir,
         }
+    }
+
+    /// Plays a beep sound using a sine wave for the specified duration and frequency.
+    fn play_beep(frequency: u32, duration_secs: u64) {
+        // Create an output stream
+        let (_stream, stream_handle) = OutputStream::try_default().unwrap();
+
+        // Create a sink
+        let sink = Sink::try_new(&stream_handle).unwrap();
+
+        // Generate a sine wave with the specified frequency
+        let source = SineWave::new(frequency as f32)
+            .take_duration(std::time::Duration::from_secs(duration_secs))
+            .amplify(0.25);
+
+        // Append the sound to the sink
+        sink.append(source);
+
+        // Sleep while the sound is playing
+        sink.sleep_until_end();
     }
 
     fn print_week_bar(&self) {
@@ -85,20 +82,18 @@ rm mycron"#;
             } else {
                 28
             }
+        } else if month % 2 == 0 {
+            30
         } else {
-            if month % 2 == 0 {
-                30
-            } else {
-                31
-            }
+            31
         };
         days
     }
 
-    fn print_time(&self) {
-        let time = self.current_datetime.format("%H:%M:%S");
-        println!("Time: {}", time);
-    }
+    // fn print_time(&self) {
+    //     let time = self.current_datetime.format("%H:%M:%S");
+    //     println!("Time: {}", time);
+    // }
     fn print_days_per_week(&self) {
         let start = self.first_week_day();
         let mut started = false;
@@ -139,14 +134,6 @@ rm mycron"#;
         week_day
     }
 
-    fn display_calendar(&self) {
-        self.print_week_bar();
-        self.print_days_per_week();
-        println!();
-        println!();
-        self.print_time();
-    }
-
     /*
     1. If the year is evenly divisible by 4, go to step 2. Otherwise, go to step 5.
     2. If the year is evenly divisible by 100, go to step 3. Otherwise, go to step 4.
@@ -166,68 +153,92 @@ rm mycron"#;
         return false;
     }
 
-    fn set_timer(&self, exe_path: &str, time: &str) {
+    fn display_timer(&self, time: &str) -> JoinHandle<()> {
         // start a timer
-        // start the cronjob which will execute after specified time
-        // after endtime execute self.end_timer
+        let time = time.to_string();
+        let joiner = thread::spawn(move || {
+            let naive_time = NaiveTime::parse_from_str(time.as_str(), "%H:%M:%S")
+                .expect("Failed to parse duration");
 
-        let now = Local::now();
-        let naive_time =
-            NaiveTime::parse_from_str(time, "%H:%M:%S").expect("Failed to parse duration");
-
-        // Convert the NaiveTime to a Duration
-        let duration = Duration::hours(naive_time.hour() as i64)
-            + Duration::minutes(naive_time.minute() as i64)
-            + Duration::seconds(naive_time.second() as i64);
-        let future = now + duration;
-        println!("{} {}", future.format("%H:%M").to_string(), exe_path);
-        match schedule_jobs_from_file(future.format("%H:%M").to_string().as_str(), exe_path) {
-            Ok(jid) => {
-                self.save_job_id(&jid).expect("Failed to save job id");
-                println!("JOBID: {}", jid);
+            // Convert the NaiveTime to a Duration
+            let mut duration = Duration::hours(naive_time.hour() as i64)
+                + Duration::minutes(naive_time.minute() as i64)
+                + Duration::seconds(naive_time.second() as i64);
+            while duration >= TimeDelta::new(0, 0).unwrap() {
+                let total_seconds = duration.num_seconds();
+                let hours = total_seconds / 3600;
+                let minutes = (total_seconds % 3600) / 60;
+                let seconds = total_seconds % 60;
+                Timer::clear_last_n_lines(2);
+                print!(
+                    "{}Timer: \n\n{:02}:{:02}:{:02}",
+                    CLEAR_LINE, hours, minutes, seconds
+                );
+                thread::sleep(std::time::Duration::new(1, 0));
+                duration -= TimeDelta::new(1, 0).unwrap();
             }
-            Err(e) => eprintln!("{}", e),
-        };
+            println!("\nDone this time!");
+            Timer::play_beep(500, 1);
+        });
+        joiner
     }
 
-    fn end_timer(&self, job_id: &str) {
-        // end a timer
-        // specified time has elapsed, removed the cron job
-        match remove_job(job_id) {
-            Ok(_) => println!("Removed job"),
-            Err(e) => eprintln!("Can not remove job: {}", e),
-        };
-    }
+    // fn save_job_id(&self, id: &str) -> Result<(), std::io::Error> {
+    //     fs::write(self.workdir.join("job.txt"), id)?;
+    //     Ok(())
+    // }
 
-    fn save_job_id(&self, id: &str) -> Result<(), std::io::Error> {
-        fs::write(self.workdir.join("job.txt"), id)?;
-        Ok(())
-    }
+    // fn get_job_id(&self) -> Option<String> {
+    //     match fs::read_to_string(self.workdir.join("job.txt")) {
+    //         Ok(con) => Some(con),
+    //         Err(_) => None,
+    //     }
+    // }
 
-    fn get_job_id(&self) -> Option<String> {
-        match fs::read_to_string(self.workdir.join("job.txt")) {
-            Ok(con) => Some(con),
-            Err(_) => None,
+    fn clear_last_n_lines(n: usize) {
+        for _ in 0..n {
+            // Move the cursor up one line
+            print!("\x1B[1A");
+            // Clear the current line
+            print!("\x1B[2K");
         }
+        // Ensure the commands are executed immediately
+        std::io::stdout().flush().unwrap();
     }
+
+    fn display_calendar(&self) {
+        self.print_week_bar();
+        self.print_days_per_week();
+        println!();
+        println!();
+        // self.print_time();
+    }
+
+    // fn display_time(&self) -> JoinHandle<()> {
+    //     let join = thread::spawn(move || loop {
+    //         thread::sleep(std::time::Duration::new(1, 0));
+    //         std::io::stdout().flush().unwrap();
+    //         Timer::clear_last_n_lines(2);
+    //         print!(
+    //             "Current Time: \n\n{}",
+    //             Local::now().format("%H:%M:%S").to_string()
+    //         );
+    //     });
+    //     join
+    // }
 }
 
 fn main() {
     let timer = Timer::new();
     timer.display_calendar();
-
+    println!();
+    println!();
     let args: Vec<String> = std::env::args().collect();
     for (i, arg) in args.iter().enumerate() {
         match arg.as_str() {
-            "st" => timer.set_timer(
-                timer.workdir.join("tasks.txt").to_str().unwrap(),
-                args.get(i + 1).unwrap(),
-            ),
-            "ed" => {
-                let jid = timer.get_job_id();
-                if let Some(j) = jid {
-                    timer.end_timer(&j);
-                }
+            "st" => {
+                let joiner = timer.display_timer(args.get(i + 1).unwrap());
+                let _ = joiner.join();
             }
             _ => (),
         }
