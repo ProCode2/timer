@@ -2,6 +2,7 @@
 
 This is a tool that I use to time my daily tasks.
 
+![Timer Demo - See below](https://github.com/user-attachments/assets/0126a3da-1876-43f0-95d6-5ba9ccea08e0)
 
 ## Features
 
